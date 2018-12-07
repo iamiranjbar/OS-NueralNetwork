@@ -434,18 +434,20 @@ void testNN(){
 
         displayImage(&img, 8,6);
 
+        for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
+            hidden_nodes[j].output = 0;
+            for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
+                hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
+            }
+            hidden_nodes[j].output += hidden_nodes[j].bias;
+            hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
+        }
+
         // loop through all output cells for the given image
         for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
             // TODO:output layer <<<<<<<<
             output_nodes[i].output = 0;
             for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
-                // TODO:middle layer <<<<<<<<
-                hidden_nodes[j].output = 0;
-                for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
-                    hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
-                }
-                hidden_nodes[j].output += hidden_nodes[j].bias;
-                hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
                 output_nodes[i].output += hidden_nodes[j].output * output_nodes[i].weights[j];
             }
             output_nodes[i].output += 1/(1+ exp(-1* output_nodes[i].output));

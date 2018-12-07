@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <semaphore.h>
 
 #define MNIST_TESTING_SET_IMAGE_FILE_NAME "data/t10k-images-idx3-ubyte"  ///< MNIST image testing file in the data folder
 #define MNIST_TESTING_SET_LABEL_FILE_NAME "data/t10k-labels-idx1-ubyte"  ///< MNIST label testing file in the data folder
@@ -20,11 +21,15 @@
 
 #define NUMBER_OF_INPUT_CELLS 784   ///< use 28*28 input cells (= number of pixels per MNIST image)
 #define NUMBER_OF_HIDDEN_CELLS 256   ///< use 256 hidden cells in one hidden layer
+#define NUMBER_OF_PART_HIDDEN_CELLS 32   ///< use 256 hidden cells in one hidden layer
 #define NUMBER_OF_OUTPUT_CELLS 10   ///< use 10 output cells to model 10 digits (0-9)
 
 #define MNIST_MAX_TESTING_IMAGES 10000                      ///< number of images+labels in the TEST file/s
 #define MNIST_IMG_WIDTH 28                                  ///< image width in pixel
 #define MNIST_IMG_HEIGHT 28                                 ///< image height in pixel
+
+#define MIDDLE_LAYER_THREADS 8
+#define OUTPUT_LAYER_THREADS 10
 
 using namespace std;
 
@@ -409,6 +414,66 @@ int getNNPrediction(){
  * 10k images.
  */
 
+sem_t img_sem, pred_sem;
+sem_t hidden_sem[8];
+sem_t out_sem[10];
+
+void get_input(MNIST_Image img, MNIST_Label lbl, FILE *imageFile,FILE *labelFile){
+    sem_wait(&img_sem);
+    img = getImage(imageFile);
+    lbl = getLabel(labelFile);
+    displayImage(&img, 8,6);
+    sem_post(&img_sem);
+}
+
+void calc_hidden_output(MNIST_Image img, int id){
+    sem_wait(&img_sem);
+    sem_wait(&hidden_sem[id]);
+    for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
+        hidden_nodes[j].output = 0;
+        for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
+            hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
+        }
+        hidden_nodes[j].output += hidden_nodes[j].bias;
+        hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
+    }
+    sem_post(&img_sem);
+    sem_post(&hidden_sem[id]);
+}
+
+void calc_output_output(int id){
+    for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
+        sem_wait(&hidden_sem[i]);
+    }
+    sem_wait(&out_sem[id]);
+    output_nodes[id].output = 0;
+    for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
+        output_nodes[id].output += hidden_nodes[j].output * output_nodes[id].weights[j];
+    }
+    output_nodes[id].output += 1/(1+ exp(-1* output_nodes[id].output));
+    for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
+        sem_post(&hidden_sem[i]);
+    }
+    sem_post(&out_sem[id]);
+}
+
+void calc_result(MNIST_Label lbl, int errCount, int imgCount){
+    for (int i = 0; i < OUTPUT_LAYER_THREADS; i++){
+        sem_wait(&out_sem[i]);
+    }
+    sem_wait(&pred_sem);
+    int predictedNum = getNNPrediction();
+    if (predictedNum!=lbl) errCount++;
+
+    printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
+
+    displayProgress(imgCount, errCount, 5, 66);
+    for (int i = 0; i < OUTPUT_LAYER_THREADS; i++){
+        sem_post(&out_sem[i]);
+    }
+    sem_post(&pred_sem);
+}
+
 void testNN(){
         // open MNIST files
     FILE *imageFile, *labelFile;
@@ -421,7 +486,14 @@ void testNN(){
 
     // number of incorrect predictions
     int errCount = 0;
-
+    
+    // initialize semaphore
+    sem_init(&img_sem,0,1);
+    sem_init(&pred_sem,0,1);
+    for (int i =0; i < MIDDLE_LAYER_THREADS; i++)
+        sem_init(&hidden_sem[i],0,1);
+    for (int i =0; i < OUTPUT_LAYER_THREADS; i++)
+        sem_init(&out_sem[i],0,1);
 
     // Loop through all images in the file
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
@@ -429,39 +501,32 @@ void testNN(){
         displayLoadingProgressTesting(imgCount,5,5);
 
         // Reading next image and corresponding label
-        // TODO:input layer <<<<<<<<<
-        MNIST_Image img = getImage(imageFile);
-        MNIST_Label lbl = getLabel(labelFile);
+        MNIST_Image img;
+        MNIST_Label lbl;
+        thread inp_thr(get_input,img,lbl,imageFile,labelFile);
 
-        displayImage(&img, 8,6);
-
-        // loop through all output cells for the given image
-        for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
-            // TODO:output layer <<<<<<<<
-            output_nodes[i].output = 0;
-            for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
-                // TODO:middle layer <<<<<<<<
-                hidden_nodes[j].output = 0;
-                for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
-                    hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
-                }
-                hidden_nodes[j].output += hidden_nodes[j].bias;
-                hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
-                output_nodes[i].output += hidden_nodes[j].output * output_nodes[i].weights[j];
-            }
-            output_nodes[i].output += 1/(1+ exp(-1* output_nodes[i].output));
+        thread hidden_thr[MIDDLE_LAYER_THREADS];
+        for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+            hidden_thr[i] = thread(calc_hidden_output,img,i);
         }
 
-        // TODO: final output <<<<<<<<
-        int predictedNum = getNNPrediction();
-        if (predictedNum!=lbl) errCount++;
+        thread output_thr[OUTPUT_LAYER_THREADS];
+        // loop through all output cells for the given image
+        for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
+            output_thr[i] = thread(calc_output_output, i);
+        }
 
-        printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
-
-        displayProgress(imgCount, errCount, 5, 66);
-
+        thread res_thr(calc_result, lbl, errCount, imgCount);
     }
 
+    // Destroy semaphores 
+    sem_destroy(&img_sem);
+    sem_destroy(&pred_sem);
+    for (int i =0; i < MIDDLE_LAYER_THREADS; i++)
+        sem_destroy(&hidden_sem[i]);
+    for (int i =0; i < OUTPUT_LAYER_THREADS; i++)
+        sem_destroy(&out_sem[i]);
+    
     // Close files
     fclose(imageFile);
     fclose(labelFile);
