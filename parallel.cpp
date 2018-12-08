@@ -419,19 +419,13 @@ sem_t hidden_sem_in[8], hidden_sem_out[8];
 sem_t out_sem_in[10], out_sem_out[10];
 int free_hidden_cnt = 8, free_out_count = 10;
 
-void get_input(MNIST_Image &img, MNIST_Label &lbl, FILE *imageFile,FILE *labelFile){
+void get_input(MNIST_Image &img, FILE *imageFile){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){     
         sem_wait(&img_sem);
-        displayLoadingProgressTesting(imgCount,5,5);
         img = getImage(imageFile);
-        lbl = getLabel(labelFile);
         displayImage(&img, 8,6);
-        for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+        for (int i =0; i < MIDDLE_LAYER_THREADS; i++)
             sem_post(&hidden_sem_in[i]);
-            sem_wait(&hidden_cnt);
-            free_hidden_cnt--;
-            sem_post(&hidden_cnt);
-        }
     }
 }
 
@@ -439,6 +433,9 @@ void calc_hidden_output(MNIST_Image img, int id){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){  
         sem_wait(&hidden_sem_in[id]);
         sem_wait(&hidden_sem_out[id]);
+        sem_wait(&hidden_cnt);
+        free_hidden_cnt--;
+        sem_post(&hidden_cnt);
         for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
             hidden_nodes[j].output = 0;
             for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
@@ -449,37 +446,53 @@ void calc_hidden_output(MNIST_Image img, int id){
         }
         sem_wait(&hidden_cnt);
         free_hidden_cnt++;
-        if(free_hidden_cnt == 8)
-            sem_post(&img_sem);    
+        if(free_hidden_cnt == MIDDLE_LAYER_THREADS){
+            sem_post(&img_sem);
+            for (int k = 0 ; k < OUTPUT_LAYER_THREADS; k++)
+                sem_post(&out_sem_in[k]);
+        }  
         sem_post(&hidden_cnt);
     }
 }
 
 void calc_output_output(int id){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){ 
-        // sem_wait(&hidden_sem);
-        sem_wait(&out_sem);
+        sem_wait(&out_sem_in[id]);
+        sem_wait(&out_sem_out[id]);
+        sem_wait(&out_cnt);
+        free_out_count--;
+        sem_post(&out_cnt);
         output_nodes[id].output = 0;
         for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
             output_nodes[id].output += hidden_nodes[j].output * output_nodes[id].weights[j];
         }
         output_nodes[id].output += 1/(1+ exp(-1* output_nodes[id].output));
-        // sem_post(&hidden_sem);
-        sem_post(&out_sem);
+        sem_wait(&out_cnt);
+        free_out_count++;
+        if (free_out_count == OUTPUT_LAYER_THREADS){
+            sem_post(&pred_sem);
+            for (int k = 0 ; k < MIDDLE_LAYER_THREADS; k++)
+                sem_post(&hidden_sem_out[k]);
+        }
+        sem_post(&out_cnt);
     }
 }
 
-void calc_result(MNIST_Label lbl, int &errCount, int imgCount){
-    sem_wait(&out_sem);
-    sem_wait(&pred_sem);
-    int predictedNum = getNNPrediction();
-    if (predictedNum!=lbl) errCount++;
+void calc_result(int &errCount,FILE *labelFile){
+    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
+        sem_wait(&pred_sem);
+        displayLoadingProgressTesting(imgCount,5,5);
+        MNIST_Label lbl;
+        lbl = getLabel(labelFile);
+        int predictedNum = getNNPrediction();
+        if (predictedNum!=lbl) errCount++;
 
-    printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
+        printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
 
-    displayProgress(imgCount, errCount, 5, 66);
-    sem_post(&out_sem);
-    sem_post(&pred_sem);
+        displayProgress(imgCount, errCount, 5, 66);
+        for (int i = 0; i < OUTPUT_LAYER_THREADS; i++)
+            sem_post(&out_sem_out[i]);
+    }
 }
 
 int turn[10] = {0 , 1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -499,20 +512,21 @@ void testNN(){
     
     // initialize semaphore
     sem_init(&hidden_cnt,0,1);
+    sem_init(&out_cnt,0,1);
     sem_init(&img_sem,0,1);
     for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
         sem_init(&hidden_sem_in[i],0,0);
         sem_init(&hidden_sem_out[i],0,1);
     }
-    // sem_init(&out_sem,0,1);
-    // sem_init(&pred_sem,0,1);
+    for (int i = 0; i < OUTPUT_LAYER_THREADS; i++){
+        sem_init(&out_sem_in[i],0,0);
+        sem_init(&out_sem_out[i],0,1);
+    }
+    sem_init(&pred_sem,0,0);
 
-    // display progress
-
-    // Reading next image and corresponding label
+    // Creating threads 
     MNIST_Image img;
-    MNIST_Label lbl;
-    thread inp(get_input,ref(img), ref(lbl), imageFile, labelFile);
+    thread inp(get_input,ref(img), imageFile);
     thread hidden_thr[MIDDLE_LAYER_THREADS];
     for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
         hidden_thr[i] = thread(calc_hidden_output,img,turn[i]);
@@ -521,6 +535,9 @@ void testNN(){
     for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
         output_thr[i] = thread(calc_output_output, turn[i]);
     }
+    thread res_thr(calc_result, ref(errCount), labelFile);
+
+    // Joining threads
     inp.join();
     for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
         hidden_thr[i].join();
@@ -528,16 +545,21 @@ void testNN(){
     for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
         output_thr[i].join();
     }
-    // thread res_thr(calc_result, lbl, ref(errCount), imgCount);
-    
-    // Destroy semaphores 
+    res_thr.join();
+
+    // Destroy semaphores
+    sem_destroy(&out_cnt);
     sem_destroy(&hidden_cnt);
     sem_destroy(&img_sem);
     for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
         sem_destroy(&hidden_sem_in[i]);
+        sem_destroy(&hidden_sem_out[i]);
     }
-    // sem_destroy(&pred_sem);
-    // sem_destroy(&out_sem);
+    for (int i = 0; i < OUTPUT_LAYER_THREADS; i++){
+        sem_destroy(&out_sem_in[i]);
+        sem_destroy(&out_sem_out[i]);
+    }
+    sem_destroy(&pred_sem);
     
     // Close files
     fclose(imageFile);
