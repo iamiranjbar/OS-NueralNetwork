@@ -7,7 +7,7 @@
 #include <iostream>
 #include <sstream> //this header file is needed when using stringstream
 #include <fstream>
-#include <string>
+#include <cstring>
 
 #define MNIST_TESTING_SET_IMAGE_FILE_NAME "data/t10k-images-idx3-ubyte"  ///< MNIST image testing file in the data folder
 #define MNIST_TESTING_SET_LABEL_FILE_NAME "data/t10k-labels-idx1-ubyte"  ///< MNIST label testing file in the data folder

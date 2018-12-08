@@ -7,9 +7,9 @@
 #include <iostream>
 #include <sstream> //this header file is needed when using stringstream
 #include <fstream>
-#include <string>
+#include <cstring>
 #include <thread>
-#include <dispatch/dispatch.h>
+#include <semaphore.h>
 
 #define MNIST_TESTING_SET_IMAGE_FILE_NAME "data/t10k-images-idx3-ubyte"  ///< MNIST image testing file in the data folder
 #define MNIST_TESTING_SET_LABEL_FILE_NAME "data/t10k-labels-idx1-ubyte"  ///< MNIST label testing file in the data folder
@@ -414,60 +414,61 @@ int getNNPrediction(){
  * 10k images.
  */
 
-dispatch_semaphore_t img_sem, pred_sem, hidden_sem, out_sem;
+sem_t img_sem, pred_sem, out_sem, lck;
+sem_t hidden_sem_in[8];
 
 void get_input(MNIST_Image &img, MNIST_Label &lbl, FILE *imageFile,FILE *labelFile){
-    cout << "salam2" << endl;
-    dispatch_semaphore_wait(img_sem, DISPATCH_TIME_FOREVER);
-    img = getImage(imageFile);
-    cout << "salam3" << endl;
-    lbl = getLabel(labelFile);
-    // displayImage(&img, 8,6);
-    cout << "salam4" << endl;
-    dispatch_semaphore_signal(img_sem);
-    cout << "salam5" << endl;
+    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){     
+        sem_wait(&img_sem);
+        img = getImage(imageFile);
+        lbl = getLabel(labelFile);
+        displayImage(&img, 8,6);
+        for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+            sem_post(&hidden_sem_in[i]);
+        }
+    }
 }
 
 void calc_hidden_output(MNIST_Image img, int id){
-    cout << "salam <<< " << id << "++++++++" << endl;
-    dispatch_semaphore_wait(img_sem, DISPATCH_TIME_FOREVER);
-    dispatch_semaphore_wait(hidden_sem, DISPATCH_TIME_FOREVER);
-    for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
-        hidden_nodes[j].output = 0;
-        for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
-            hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
+    // cout << "salam <<< " << id << "++++++++" << endl;
+    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){  
+        sem_wait(&hidden_sem_in[id]);
+        for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
+            hidden_nodes[j].output = 0;
+            for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
+                hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
+            }
+            hidden_nodes[j].output += hidden_nodes[j].bias;
+            hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
         }
-        hidden_nodes[j].output += hidden_nodes[j].bias;
-        hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
+        sem_post(&img_sem);
     }
-    dispatch_semaphore_signal(img_sem);
-    dispatch_semaphore_signal(hidden_sem);
-    cout << "salam >>> " << id << endl;
+        // cout << "salam >>> " << id << endl;
 }
 
 void calc_output_output(int id){
-    dispatch_semaphore_wait(hidden_sem, DISPATCH_TIME_FOREVER);
-    dispatch_semaphore_wait(out_sem, DISPATCH_TIME_FOREVER);
+    // sem_wait(&hidden_sem);
+    sem_wait(&out_sem);
     output_nodes[id].output = 0;
     for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
         output_nodes[id].output += hidden_nodes[j].output * output_nodes[id].weights[j];
     }
     output_nodes[id].output += 1/(1+ exp(-1* output_nodes[id].output));
-    dispatch_semaphore_signal(hidden_sem);
-    dispatch_semaphore_signal(out_sem);
+    // sem_post(&hidden_sem);
+    sem_post(&out_sem);
 }
 
 void calc_result(MNIST_Label lbl, int &errCount, int imgCount){
-    dispatch_semaphore_wait(out_sem, DISPATCH_TIME_FOREVER);
-    dispatch_semaphore_wait(pred_sem, DISPATCH_TIME_FOREVER);
+    sem_wait(&out_sem);
+    sem_wait(&pred_sem);
     int predictedNum = getNNPrediction();
     if (predictedNum!=lbl) errCount++;
 
     // printf("\n      Prediction: %d   Actual: %d ",predictedNum, lbl);
 
     // displayProgress(imgCount, errCount, 5, 66);
-    dispatch_semaphore_signal(out_sem);
-    dispatch_semaphore_signal(pred_sem);
+    sem_post(&out_sem);
+    sem_post(&pred_sem);
 }
 
 int turn[10] = {0 , 1, 2, 3, 4, 5, 6, 7, 8, 9};
@@ -486,44 +487,44 @@ void testNN(){
     int errCount = 0;
     
     // initialize semaphore
-    img_sem = dispatch_semaphore_create(1);;
-    pred_sem = dispatch_semaphore_create(1);;
-    hidden_sem = dispatch_semaphore_create(1);
-    out_sem = dispatch_semaphore_create(1);
-
+    sem_init(&img_sem,0,1);
+    for (int i = 0; i < MIDDLE_LAYER_THREADS; i++)
+        sem_init(&hidden_sem_in[i],0,0);
+    // sem_init(&out_sem,0,1);
+    // sem_init(&pred_sem,0,1);
     // Loop through all images in the file
-    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){
-        // display progress
-        // displayLoadingProgressTesting(imgCount,5,5);
 
-        // Reading next image and corresponding label
-        MNIST_Image img;
-        MNIST_Label lbl;
-        cout << "salam1" << endl;
-        thread inp_thr(get_input,ref(img),ref(lbl),imageFile,labelFile);
-        cout << "salam6" << endl;
-        inp_thr.join();
-        // thread hidden_thr[MIDDLE_LAYER_THREADS];
-        // for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
-        //     // cout << "salam " << i << endl;
-        //     hidden_thr[i] = thread(calc_hidden_output,img,turn[i]);
-        // }
+    // display progress
+    // displayLoadingProgressTesting(imgCount,5,5);
 
-        // thread output_thr[OUTPUT_LAYER_THREADS];
-        // // loop through all output cells for the given image
-        // for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
-        //     output_thr[i] = thread(calc_output_output, turn[i]);
-        // }
-
-        // thread res_thr(calc_result, lbl, ref(errCount), imgCount);
-        cout << "salam7" << endl;
+    // Reading next image and corresponding label
+    MNIST_Image img;
+    MNIST_Label lbl;
+    thread inp(get_input,ref(img), ref(lbl), imageFile, labelFile);
+    thread hidden_thr[MIDDLE_LAYER_THREADS];
+    for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+        // cout << "salam****************" << i << endl;
+        hidden_thr[i] = thread(calc_hidden_output,img,turn[i]);
     }
+    inp.join();
+    for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+        // cout << "salam****************" << i << endl;
+        hidden_thr[i].join();
+    }
+    // thread output_thr[OUTPUT_LAYER_THREADS];
+    // // loop through all output cells for the given image
+    // for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
+    //     output_thr[i] = thread(calc_output_output, turn[i]);
+    // }
 
+    // thread res_thr(calc_result, lbl, ref(errCount), imgCount);
+    
     // Destroy semaphores 
-    dispatch_release(img_sem);
-    dispatch_release(pred_sem);
-    dispatch_release(hidden_sem);
-    dispatch_release(out_sem);
+    // sem_destroy(&img_sem);
+    // for (int i = 0; i < MIDDLE_LAYER_THREADS; i++)
+    //     sem_destroy(&hidden_sem_in[i]);
+    // sem_destroy(&pred_sem);
+    // sem_destroy(&out_sem);
     
     // Close files
     fclose(imageFile);
