@@ -415,28 +415,30 @@ int getNNPrediction(){
  */
 
 sem_t img_sem, pred_sem, hidden_cnt, out_cnt;
-sem_t hidden_sem_in[8], hidden_sem_out[8];
+sem_t hidden_sem_in[256], hidden_sem_out[256];
 sem_t out_sem_in[10], out_sem_out[10];
 int hid_cnt = 0, out_count = 0;
 MNIST_Image img;
 
-void get_input(FILE *imageFile){
+void get_input(FILE *imageFile, int hidden_thr_num){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){     
         sem_wait(&img_sem);
         img = getImage(imageFile);
         displayImage(&img, 8,6);
-        for (int i =0; i < MIDDLE_LAYER_THREADS; i++)
+        for (int i =0; i < hidden_thr_num; i++)
             sem_post(&hidden_sem_in[i]);
     }
 }
 
-void calc_hidden_output(int id){
+void calc_hidden_output(int id, int hidden_thr_num){
+    int part_cells = 256/ hidden_thr_num;
+    int final_node = (id+1) * part_cells;
+    if (id == hidden_thr_num-1)
+        final_node = 256;
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){ 
         sem_wait(&hidden_sem_in[id]);
         sem_wait(&hidden_sem_out[id]);
-        // if (id == 0)
-            // displayImage(&img, 8,6);
-        for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
+        for (int j = id*part_cells; j < final_node; j++) {
             hidden_nodes[j].output = 0;
             for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
                 hidden_nodes[j].output += img.pixel[z] * hidden_nodes[j].weights[z];
@@ -447,7 +449,7 @@ void calc_hidden_output(int id){
         }
         sem_wait(&hidden_cnt);
         hid_cnt++;
-        if(hid_cnt == MIDDLE_LAYER_THREADS){
+        if(hid_cnt == hidden_thr_num){
             sem_post(&img_sem);
             for (int k = 0 ; k < OUTPUT_LAYER_THREADS; k++)
                 sem_post(&out_sem_in[k]);
@@ -457,7 +459,7 @@ void calc_hidden_output(int id){
     }
 }
 
-void calc_output_output(int id){
+void calc_output_output(int id, int hidden_thr_num){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){ 
         sem_wait(&out_sem_in[id]);
         sem_wait(&out_sem_out[id]);
@@ -470,7 +472,7 @@ void calc_output_output(int id){
         out_count++;
         if (out_count == OUTPUT_LAYER_THREADS){
             sem_post(&pred_sem);
-            for (int k = 0 ; k < MIDDLE_LAYER_THREADS; k++)
+            for (int k = 0 ; k < hidden_thr_num; k++)
                 sem_post(&hidden_sem_out[k]);
             out_count = 0;
         }
@@ -495,9 +497,9 @@ void calc_result(int &errCount,FILE *labelFile){
     }
 }
 
-int turn[10] = {0 , 1, 2, 3, 4, 5, 6, 7, 8, 9};
+int turn[256];
 
-void testNN(){
+void testNN(int hidden_thr_num){
     // open MNIST files
     FILE *imageFile, *labelFile;
     imageFile = openMNISTImageFile(MNIST_TESTING_SET_IMAGE_FILE_NAME);
@@ -510,11 +512,13 @@ void testNN(){
     // number of incorrect predictions
     int errCount = 0;
     
+    for (int i=0; i < 256; i++)
+        turn[i] = i;
     // initialize semaphore
     sem_init(&hidden_cnt,0,1);
     sem_init(&out_cnt,0,1);
     sem_init(&img_sem,0,1);
-    for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
+    for (int i = 0; i < hidden_thr_num; i++){
         sem_init(&hidden_sem_in[i],0,0);
         sem_init(&hidden_sem_out[i],0,1);
     }
@@ -525,20 +529,20 @@ void testNN(){
     sem_init(&pred_sem,0,0);
 
     // Creating threads 
-    thread inp(get_input, imageFile);
-    thread hidden_thr[MIDDLE_LAYER_THREADS];
-    for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
-        hidden_thr[i] = thread(calc_hidden_output,turn[i]);
+    thread inp(get_input, imageFile, hidden_thr_num);
+    thread hidden_thr[hidden_thr_num];
+    for (int i =0; i < hidden_thr_num; i++){
+        hidden_thr[i] = thread(calc_hidden_output,turn[i], hidden_thr_num);
     }
     thread output_thr[OUTPUT_LAYER_THREADS];
     for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
-        output_thr[i] = thread(calc_output_output, turn[i]);
+        output_thr[i] = thread(calc_output_output, turn[i], hidden_thr_num);
     }
     thread res_thr(calc_result, ref(errCount), labelFile);
 
     // Joining threads
     inp.join();
-    for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
+    for (int i =0; i < hidden_thr_num; i++){
         hidden_thr[i].join();
     }
     for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
@@ -550,7 +554,7 @@ void testNN(){
     sem_destroy(&out_cnt);
     sem_destroy(&hidden_cnt);
     sem_destroy(&img_sem);
-    for (int i = 0; i < MIDDLE_LAYER_THREADS; i++){
+    for (int i = 0; i < hidden_thr_num; i++){
         sem_destroy(&hidden_sem_in[i]);
         sem_destroy(&hidden_sem_out[i]);
     }
@@ -578,8 +582,12 @@ int main(int argc, const char * argv[]) {
     allocateHiddenParameters();
     allocateOutputParameters();
 
+    int hidden_thr_num;
+    cout << "Please enter number of hidden threads:" << endl;
+    cin >> hidden_thr_num;
+
     //test the neural network
-    testNN();
+    testNN(hidden_thr_num);
 
     locateCursor(38, 5);
 
