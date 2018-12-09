@@ -417,9 +417,10 @@ int getNNPrediction(){
 sem_t img_sem, pred_sem, hidden_cnt, out_cnt;
 sem_t hidden_sem_in[8], hidden_sem_out[8];
 sem_t out_sem_in[10], out_sem_out[10];
-int free_hidden_cnt = 8, free_out_count = 10;
+int hid_cnt = 0, out_count = 0;
+MNIST_Image img;
 
-void get_input(MNIST_Image &img, FILE *imageFile){
+void get_input(FILE *imageFile){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){     
         sem_wait(&img_sem);
         img = getImage(imageFile);
@@ -429,13 +430,12 @@ void get_input(MNIST_Image &img, FILE *imageFile){
     }
 }
 
-void calc_hidden_output(MNIST_Image img, int id){
-    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){  
+void calc_hidden_output(int id){
+    for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){ 
         sem_wait(&hidden_sem_in[id]);
         sem_wait(&hidden_sem_out[id]);
-        sem_wait(&hidden_cnt);
-        free_hidden_cnt--;
-        sem_post(&hidden_cnt);
+        // if (id == 0)
+            // displayImage(&img, 8,6);
         for (int j = id*NUMBER_OF_PART_HIDDEN_CELLS; j < (id+1) * NUMBER_OF_PART_HIDDEN_CELLS; j++) {
             hidden_nodes[j].output = 0;
             for (int z = 0; z < NUMBER_OF_INPUT_CELLS; z++) {
@@ -443,14 +443,16 @@ void calc_hidden_output(MNIST_Image img, int id){
             }
             hidden_nodes[j].output += hidden_nodes[j].bias;
             hidden_nodes[j].output = (hidden_nodes[j].output >= 0) ?  hidden_nodes[j].output : 0;
+            
         }
         sem_wait(&hidden_cnt);
-        free_hidden_cnt++;
-        if(free_hidden_cnt == MIDDLE_LAYER_THREADS){
+        hid_cnt++;
+        if(hid_cnt == MIDDLE_LAYER_THREADS){
             sem_post(&img_sem);
             for (int k = 0 ; k < OUTPUT_LAYER_THREADS; k++)
                 sem_post(&out_sem_in[k]);
-        }  
+            hid_cnt = 0;
+        }
         sem_post(&hidden_cnt);
     }
 }
@@ -459,20 +461,18 @@ void calc_output_output(int id){
     for (int imgCount=0; imgCount<MNIST_MAX_TESTING_IMAGES; imgCount++){ 
         sem_wait(&out_sem_in[id]);
         sem_wait(&out_sem_out[id]);
-        sem_wait(&out_cnt);
-        free_out_count--;
-        sem_post(&out_cnt);
         output_nodes[id].output = 0;
         for (int j = 0; j < NUMBER_OF_HIDDEN_CELLS; j++) {
             output_nodes[id].output += hidden_nodes[j].output * output_nodes[id].weights[j];
         }
         output_nodes[id].output += 1/(1+ exp(-1* output_nodes[id].output));
         sem_wait(&out_cnt);
-        free_out_count++;
-        if (free_out_count == OUTPUT_LAYER_THREADS){
+        out_count++;
+        if (out_count == OUTPUT_LAYER_THREADS){
             sem_post(&pred_sem);
             for (int k = 0 ; k < MIDDLE_LAYER_THREADS; k++)
                 sem_post(&hidden_sem_out[k]);
+            out_count = 0;
         }
         sem_post(&out_cnt);
     }
@@ -525,11 +525,10 @@ void testNN(){
     sem_init(&pred_sem,0,0);
 
     // Creating threads 
-    MNIST_Image img;
-    thread inp(get_input,ref(img), imageFile);
+    thread inp(get_input, imageFile);
     thread hidden_thr[MIDDLE_LAYER_THREADS];
     for (int i =0; i < MIDDLE_LAYER_THREADS; i++){
-        hidden_thr[i] = thread(calc_hidden_output,img,turn[i]);
+        hidden_thr[i] = thread(calc_hidden_output,turn[i]);
     }
     thread output_thr[OUTPUT_LAYER_THREADS];
     for (int i= 0; i < NUMBER_OF_OUTPUT_CELLS; i++){
